@@ -16,10 +16,33 @@ async function(args) {
   if (!args.query) return {error: 'Missing argument: query', hint: 'Provide a search query string'};
   const num = args.count || 10;
   const url = 'https://www.google.com/search?q=' + encodeURIComponent(args.query) + '&num=' + num;
-  const resp = await fetch(url, {credentials: 'include'});
-  if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'Make sure a google.com tab is open'};
-  const html = await resp.text();
-  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const doc = await new Promise((resolve, reject) => {
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = url;
+
+    const cleanup = () => iframe.remove();
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out loading Google search results'));
+    }, 8000);
+
+    iframe.onload = () => {
+      try {
+        const loadedDoc = iframe.contentDocument;
+        if (!loadedDoc) throw new Error('No iframe document');
+        clearTimeout(timer);
+        cleanup();
+        resolve(loadedDoc);
+      } catch (error) {
+        clearTimeout(timer);
+        cleanup();
+        reject(error);
+      }
+    };
+
+    document.body.appendChild(iframe);
+  });
 
   // Extract results structurally — no dependency on CSS class names.
   // Each organic result has an h3 (title) inside an <a> (link).
@@ -27,7 +50,8 @@ async function(args) {
   const h3s = doc.querySelectorAll('h3');
   const results = [];
   for (const h3 of h3s) {
-    const a = h3.closest('a');
+    // Google now mixes both `a > h3` and `h3 > a` structures.
+    const a = h3.closest('a') || h3.querySelector('a');
     if (!a) continue;
     const link = a.getAttribute('href');
     if (!link || !link.startsWith('http')) continue;
