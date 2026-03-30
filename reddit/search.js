@@ -20,13 +20,48 @@
 async function(args) {
   if (!args.query) return {error: 'Missing argument: query', hint: 'Provide a search query'};
 
-  const count = Math.min(parseInt(args.count) || 25, 100);
-  const sort = args.sort || 'relevance';
-  const time = args.time || 'all';
+  const validSorts = new Set(['relevance', 'hot', 'top', 'new', 'comments']);
+  const validTimes = new Set(['all', 'hour', 'day', 'week', 'month', 'year']);
+  const isNumberLike = v => /^\d+$/.test(String(v || '').trim());
+
+  let subreddit = args.subreddit;
+  let sort = args.sort;
+  let time = args.time;
+  let count = args.count;
+
+  // bb-browser may shift optional flags left into positional optional args.
+  if (!count && isNumberLike(time)) {
+    count = time;
+    time = undefined;
+  }
+  if (!count && isNumberLike(sort)) {
+    count = sort;
+    sort = undefined;
+  }
+  if (!count && isNumberLike(subreddit)) {
+    count = subreddit;
+    subreddit = undefined;
+  }
+  if (!time && validTimes.has(String(sort || '').trim())) {
+    time = sort;
+    sort = undefined;
+  }
+  if (!time && validTimes.has(String(subreddit || '').trim())) {
+    time = subreddit;
+    subreddit = undefined;
+  }
+  if (!sort && validSorts.has(String(subreddit || '').trim())) {
+    sort = subreddit;
+    subreddit = undefined;
+  }
+
+  count = Math.min(parseInt(count) || 25, 100);
+  sort = sort || 'relevance';
+  time = time || 'all';
 
   let url;
-  if (args.subreddit) {
-    url = '/r/' + args.subreddit + '/search.json?restrict_sr=on&q=' + encodeURIComponent(args.query);
+  if (subreddit) {
+    url = '/r/' + subreddit + '/search.json?restrict_sr=on&q=' + encodeURIComponent(args.query);
   } else {
     url = '/search.json?q=' + encodeURIComponent(args.query);
   }
@@ -55,7 +90,7 @@ async function(args) {
 
   return {
     query: args.query,
-    subreddit: args.subreddit || null,
+    subreddit: subreddit || null,
     sort,
     time,
     count: posts.length,
