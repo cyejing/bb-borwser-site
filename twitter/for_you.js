@@ -1,49 +1,30 @@
 /* @meta
 {
-  "name": "twitter/search",
-  "description": "搜索推文",
+  "name": "twitter/for_you",
+  "description": "获取首页 For You 时间线（过滤广告）",
   "domain": "x.com",
   "args": {
-    "query": {"required": true, "description": "Search query"},
-    "count": {"required": false, "description": "Number of results (default 20, max 50)"},
-    "type": {"required": false, "description": "Result type: latest (default) or top"}
+    "count": {"required": false, "description": "Number of tweets (default 20, max 50)"}
   },
   "capabilities": ["network"],
   "readOnly": true,
-  "example": "bb-browser site twitter/search \"claude code\""
+  "example": "bb-browser site twitter/for_you"
 }
 */
 
 async function(args) {
-  if (!args.query) return {error: 'Missing argument: query', hint: 'Provide a search query'};
   const ct0 = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('ct0='))?.split('=')[1];
   if (!ct0) return {error: 'No ct0 cookie', hint: 'Please log in to https://x.com first.'};
-
-  const queryId = 'Yw6L66Pw54NHKuq4Dp7b4Q';
   const bearer = decodeURIComponent('AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA');
-  const path = '/i/api/graphql/' + queryId + '/SearchTimeline';
-
-  let txId;
-  try {
-    let __webpack_require__;
-    const chunkId = '__bb_s_' + Date.now();
-    window.webpackChunk_twitter_responsive_web.push([[chunkId], {}, (req) => { __webpack_require__ = req; }]);
-    const txMod = __webpack_require__(991160);
-    if (typeof txMod?.kc === 'function') {
-      txId = await txMod.kc('x.com', path, 'GET');
-    }
-  } catch {}
-
-  const _h = {
-    'Authorization': 'Bearer ' + bearer, 'X-Csrf-Token': ct0,
-    'X-Twitter-Auth-Type': 'OAuth2Session', 'X-Twitter-Active-User': 'yes',
-    ...(txId ? {'X-Client-Transaction-Id': txId} : {})
-  };
+  const _h = {'Authorization':'Bearer '+bearer, 'X-Csrf-Token':ct0, 'X-Twitter-Auth-Type':'OAuth2Session', 'X-Twitter-Active-User':'yes'};
 
   const count = Math.min(parseInt(args.count) || 20, 50);
-  const product = (args.type === 'top') ? 'Top' : 'Latest';
   const variables = JSON.stringify({
-    rawQuery: args.query, count, querySource: 'typed_query', product
+    count,
+    includePromotedContent: false,
+    latestControlAvailable: true,
+    requestContext: 'launch',
+    withCommunity: true
   });
   const features = JSON.stringify({
     rweb_video_screen_enabled: false, profile_label_improvements_pcf_label_in_post_enabled: true,
@@ -64,40 +45,67 @@ async function(args) {
     longform_notetweets_rich_text_read_enabled: true, longform_notetweets_inline_media_enabled: false,
     responsive_web_enhance_cards_enabled: false
   });
-  const url = path + '?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
+
+  const url = '/i/api/graphql/HJFjzBgCs16TqxewQOeLNg/HomeTimeline?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
   const resp = await fetch(url, {headers: _h, credentials: 'include'});
   if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'queryId may have changed'};
   const d = await resp.json();
 
-  const instructions = d.data?.search_by_raw_query?.search_timeline?.timeline?.instructions || [];
+  const instructions = d.data?.home?.home_timeline_urt?.instructions || [];
   let tweets = [];
-  const seen = new Set();
-
-  function pushTweet(r) {
+  
+  function extractTweet(itemContent, source) {
+    if (!itemContent) return;
+    if (itemContent.promotedMetadata) return;
+    
+    const r = itemContent.tweet_results?.result;
     if (!r) return;
     const tw = r.tweet || r;
     const l = tw.legacy || {};
-    if (!tw.rest_id || seen.has(tw.rest_id)) return;
-    seen.add(tw.rest_id);
+    if (!tw.rest_id) return;
     const u = tw.core?.user_results?.result;
     const nt = tw.note_tweet?.note_tweet_results?.result?.text;
     const screenName = u?.legacy?.screen_name || u?.core?.screen_name;
-    tweets.push({id: tw.rest_id, author: screenName,
-      name: u?.legacy?.name || u?.core?.name,
-      url: 'https://x.com/' + (screenName || '_') + '/status/' + tw.rest_id,
-      text: nt || l.full_text || '', likes: l.favorite_count, retweets: l.retweet_count,
-      replies: l.reply_count, views: l.ext_views?.count,
-      in_reply_to: l.in_reply_to_status_id_str || undefined, created_at: l.created_at});
+    
+    const socialContext = itemContent.socialContext;
+    const src = source || socialContext?.text || null;
+    
+    const rt = l.retweeted_status_result?.result;
+    if (rt) {
+      const rtw = rt.tweet || rt; const rl = rtw.legacy || {};
+      const ru = rtw.core?.user_results?.result;
+      const rnt = rtw.note_tweet?.note_tweet_results?.result?.text;
+      const tweet = {id: tw.rest_id, type: 'retweet', author: screenName,
+        url: 'https://x.com/' + (screenName || '_') + '/status/' + tw.rest_id,
+        rt_author: ru?.legacy?.screen_name || ru?.core?.screen_name, text: rnt || rl.full_text || '',
+        likes: rl.favorite_count, retweets: rl.retweet_count, created_at: l.created_at};
+      if (src) tweet.source = src;
+      tweets.push(tweet);
+    } else {
+      const tweet = {id: tw.rest_id, type: l.in_reply_to_status_id_str ? 'reply' : 'tweet', author: screenName,
+        name: u?.legacy?.name || u?.core?.name,
+        url: 'https://x.com/' + (screenName || '_') + '/status/' + tw.rest_id,
+        text: nt || l.full_text || '', likes: l.favorite_count, retweets: l.retweet_count,
+        in_reply_to: l.in_reply_to_status_id_str || undefined, created_at: l.created_at};
+      if (src) tweet.source = src;
+      tweets.push(tweet);
+    }
   }
-
+  
   for (const inst of instructions) {
     for (const entry of (inst.entries || [])) {
-      pushTweet(entry.content?.itemContent?.tweet_results?.result);
-      for (const item of (entry.content?.items || [])) {
-        pushTweet(item.item?.itemContent?.tweet_results?.result);
+      const content = entry.content;
+      
+      if (content?.items) {
+        for (const item of content.items) {
+          extractTweet(item.item?.itemContent, null);
+        }
+        continue;
       }
+      
+      extractTweet(content?.itemContent, null);
     }
   }
 
-  return {query: args.query, product, count: tweets.length, tweets};
+  return {count: tweets.length, tweets};
 }
