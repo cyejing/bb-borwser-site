@@ -1,7 +1,7 @@
 /* @meta
 {
   "name": "google/search",
-  "description": "Google 搜索",
+  "description": "Google 搜索 (Google search: title, url, snippet)",
   "domain": "www.google.com",
   "args": {
     "query": {"required": true, "description": "Search query"},
@@ -15,64 +15,84 @@
 async function(args) {
   if (!args.query) return {error: 'Missing argument: query', hint: 'Provide a search query string'};
   const num = args.count || 10;
-  const url = 'https://www.google.com/search?q=' + encodeURIComponent(args.query) + '&num=' + num;
-  const doc = await new Promise((resolve, reject) => {
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    iframe.src = url;
 
-    const cleanup = () => iframe.remove();
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error('Timed out loading Google search results'));
-    }, 8000);
+  // Navigate to search URL and parse rendered DOM instead of fetching HTML
+  // (Google returns different HTML for programmatic fetch vs browser navigation)
+  const url = '/search?q=' + encodeURIComponent(args.query) + '&num=' + num;
+  const resp = await fetch(url, {credentials: 'include'});
+  if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'Make sure a google.com tab is open'};
+  const html = await resp.text();
+  const pageTitle = (html.match(/<title>([^<]*)<\/title>/) || [])[1] || '';
+  if (/unusual traffic|异常流量|\/sorry\//i.test(pageTitle)) {
+    return {error: 'Blocked by Google CAPTCHA (/sorry)', hint: 'Google temporarily flagged this IP. Open a google.com tab in the managed browser, solve the CAPTCHA once, then retry; or wait for the block to expire.'};
+  }
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
 
-    iframe.onload = () => {
-      try {
-        const loadedDoc = iframe.contentDocument;
-        if (!loadedDoc) throw new Error('No iframe document');
-        clearTimeout(timer);
-        cleanup();
-        resolve(loadedDoc);
-      } catch (error) {
-        clearTimeout(timer);
-        cleanup();
-        reject(error);
+  // Try multiple selectors — Google changes DOM structure frequently
+  const results = [];
+
+  // Strategy 1: h3 elements with parent anchor (most reliable)
+  const headings = doc.querySelectorAll('h3');
+  headings.forEach(h3 => {
+    const anchor = h3.closest('a') || h3.parentElement?.querySelector('a[href]');
+    if (!anchor) return;
+    const link = anchor.getAttribute('href');
+    if (!link || link.startsWith('/search') || link.startsWith('#')) return;
+
+    // Find snippet: walk up to the result container and grab text
+    let snippet = '';
+    // Go up to find the result container (typically 3-5 levels up from h3)
+    let container = h3;
+    for (let i = 0; i < 5; i++) {
+      container = container.parentElement;
+      if (!container) break;
+      // Check if this container has enough text content beyond the heading
+      const allText = container.textContent || '';
+      if (allText.length > h3.textContent.length + 50) {
+        // Extract text excluding the heading
+        const clone = container.cloneNode(true);
+        const cloneH3 = clone.querySelector('h3');
+        if (cloneH3) cloneH3.remove();
+        // Remove cite/url elements
+        clone.querySelectorAll('cite').forEach(c => c.remove());
+        const remaining = clone.textContent.trim();
+        if (remaining.length > 30) {
+          snippet = remaining.substring(0, 300);
+          break;
+        }
       }
-    };
+    }
 
-    document.body.appendChild(iframe);
+    // Fallback: look for spans with substantial text in nearby elements
+    if (!snippet) {
+      const parent = h3.closest('[data-ved]') || h3.parentElement?.parentElement?.parentElement;
+      if (parent) {
+        const spans = parent.querySelectorAll('span');
+        for (const sp of spans) {
+          const txt = sp.textContent.trim();
+          if (txt.length > 40 && txt !== h3.textContent.trim()) {
+            snippet = txt;
+            break;
+          }
+        }
+      }
+    }
+
+    results.push({
+      title: h3.textContent.trim(),
+      url: link.startsWith('/url?q=') ? decodeURIComponent(link.split('/url?q=')[1].split('&')[0]) : link,
+      snippet: snippet
+    });
   });
 
-  // Extract results structurally — no dependency on CSS class names.
-  // Each organic result has an h3 (title) inside an <a> (link).
-  // For each h3, walk up to find its result container (stops when parent has sibling results).
-  const h3s = doc.querySelectorAll('h3');
-  const results = [];
-  for (const h3 of h3s) {
-    // Google now mixes both `a > h3` and `h3 > a` structures.
-    const a = h3.closest('a') || h3.querySelector('a');
-    if (!a) continue;
-    const link = a.getAttribute('href');
-    if (!link || !link.startsWith('http')) continue;
-    const title = h3.textContent.trim();
-    // Walk up from the link to find the result container
-    let container = a;
-    while (container.parentElement && container.parentElement.tagName !== 'BODY') {
-      const sibs = [...container.parentElement.children];
-      if (sibs.filter(s => s.querySelector('h3')).length > 1) break;
-      container = container.parentElement;
-    }
-    // Snippet: first substantial span outside the link block
-    let snippet = '';
-    const linkBlock = a.closest('div') || a;
-    const spans = container.querySelectorAll('span');
-    for (const sp of spans) {
-      if (linkBlock.contains(sp)) continue;
-      const t = sp.textContent.trim();
-      if (t.length > 30 && t !== title) { snippet = t; break; }
-    }
-    results.push({title, url: link, snippet});
-  }
-  return {query: args.query, count: results.length, results};
+  // Deduplicate by URL
+  const seen = new Set();
+  const unique = results.filter(r => {
+    if (seen.has(r.url)) return false;
+    seen.add(r.url);
+    return true;
+  });
+
+  return {query: args.query, count: unique.length, results: unique};
 }
